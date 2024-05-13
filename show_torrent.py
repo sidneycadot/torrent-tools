@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+#! /usr/bin/env -S python3 -u
 
 """This script reads one or more torrent files and lists their content.
 
@@ -11,7 +11,8 @@ import argparse
 import hashlib
 from typing import Union, NamedTuple
 
-def _decode_bencoded_data_recursive(bencoded_data: bytes, idx: int) -> tuple[Union[int, list, dict, bytes], int]:
+
+def _decode_bencoded_data_recursive(bencoded_data: bytes, idx: int) -> tuple[int|list|dict|bytes, int]:
     """Recursively parse a bencoded byte sequence."""
     first_character = chr(bencoded_data[idx])
     match first_character:
@@ -49,7 +50,7 @@ def _decode_bencoded_data_recursive(bencoded_data: bytes, idx: int) -> tuple[Uni
             return (decoded_bytes, colon_idx+size+1)
 
 
-def decode_bencoded_data(data: bytes) -> Union[int, list, dict, bytes]:
+def decode_bencoded_data(data: bytes) -> int|list|dict|bytes:
     """Parse a bencoded byte sequence."""
     (value, idx) = _decode_bencoded_data_recursive(data, 0)
     if idx != len(data):
@@ -69,96 +70,107 @@ class FileDescription(NamedTuple):
 def process_torrent_file(torrent_filename: str, prefix_path: str, check_content: bool):
     """Process a given torrent file."""
 
-    with open(torrent_filename, "rb") as fi:
-        torrent_data_raw = fi.read()
+    try:
 
-    torrent_data = decode_bencoded_data(torrent_data_raw)
+        try:
+            with open(torrent_filename, "rb") as fi:
+                torrent_data_raw = fi.read()
+        except FileNotFoundError:
+            raise TorrentVerificationError("Torrent file not found, unable to process.".format(torrent_filename))
 
-    torrent_data_info = torrent_data["info"]
+        torrent_data = decode_bencoded_data(torrent_data_raw)
 
-    # The toplevel "name" field is the filename (single file torrent) or directory name (multi-file torrent).
-    torrent_data_info_name = torrent_data_info["name"].decode()
+        torrent_data_info = torrent_data["info"]
 
-    if "files" in torrent_data_info:
-        # The "info" dict has a "files" sub-dictionary, to handle multiple files.
-        # In this case, 'torrent_data_info_name' is a directory prefix to be prepended to each of the file names.
-        torrent_data_info_files = torrent_data_info["files"]
-        file_descriptions = [FileDescription(os.path.join(torrent_data_info_name, file_info["path"][0].decode()), file_info["length"]) for file_info in torrent_data_info_files]
-    else:
-        # The "info" dict doesn't have a "files" sub-dictionary; the torrent describes a single file.
-        # In this case, 'torrent_data_info_name' is the name of the single file.
-        file_descriptions = [FileDescription(torrent_data_info_name, torrent_data_info["length"])]
+        # The toplevel "name" field is the filename (single file torrent) or directory name (multi-file torrent).
+        torrent_data_info_name = torrent_data_info["name"].decode()
 
-    # Calculate total size of all data described by the torrent file.
-    total_size = sum(file_description.size for file_description in file_descriptions)
+        if "files" in torrent_data_info:
+            # The "info" dict has a "files" sub-dictionary, to handle multiple files.
+            # In this case, 'torrent_data_info_name' is a directory prefix to be prepended to each of the file names.
+            torrent_data_info_files = torrent_data_info["files"]
+            file_descriptions = [FileDescription(os.path.join(torrent_data_info_name, file_info["path"][0].decode()), file_info["length"]) for file_info in torrent_data_info_files]
+        else:
+            # The "info" dict doesn't have a "files" sub-dictionary; the torrent describes a single file.
+            # In this case, 'torrent_data_info_name' is the name of the single file.
+            file_descriptions = [FileDescription(torrent_data_info_name, torrent_data_info["length"])]
 
-    # Verify that the hashes specified have the expected size.
-    piece_size = torrent_data_info["piece length"]
-    torrent_data_info_piece_hashes = torrent_data_info["pieces"]
+        # Calculate total size of all data described by the torrent file.
+        total_size = sum(file_description.size for file_description in file_descriptions)
 
-    single_piece_hash_size = 20  # SHA1 hash is 160 bits or 20 bytes.
-    expected_torrent_data_info_piece_hashes_count = (total_size + piece_size - 1) // piece_size
-    expected_torrent_data_info_piece_hashes_size = expected_torrent_data_info_piece_hashes_count * single_piece_hash_size
+        # Verify that the hashes specified have the expected size.
+        piece_size = torrent_data_info["piece length"]
+        torrent_data_info_piece_hashes = torrent_data_info["pieces"]
 
-    if len(torrent_data_info_piece_hashes) != expected_torrent_data_info_piece_hashes_size:
-        raise TorrentVerificationError("Bad length of torrent info piece hashes field (expected {} bytes, got {} bytes).".format(
-            expected_torrent_data_info_piece_hashes_size, len(torrent_data_info_piece_hashes)))
+        single_piece_hash_size = 20  # SHA1 hash is 160 bits or 20 bytes.
+        expected_torrent_data_info_piece_hashes_count = (total_size + piece_size - 1) // piece_size
+        expected_torrent_data_info_piece_hashes_size = expected_torrent_data_info_piece_hashes_count * single_piece_hash_size
 
-    if not check_content:
-        # Print torrent info and list its contents. Do not verify the contents.
-        print("Listing torrent {}: {} files, {} bytes, piece size {} bytes.".format(torrent_filename, len(file_descriptions), total_size, piece_size))
-        for file_description in file_descriptions:
-            full_filename = os.path.join(prefix_path, file_description.name)
-            print("    File {}: {} bytes.".format(full_filename, file_description.size))
-    else:
-        # Print torrent and list/verify its contents.
-        print("Verifying torrent {}: {} files, {} bytes, piece size {} bytes.".format(torrent_filename, len(file_descriptions), total_size, piece_size))
+        if len(torrent_data_info_piece_hashes) != expected_torrent_data_info_piece_hashes_size:
+            raise TorrentVerificationError("Bad length of torrent info piece hashes field (expected {} bytes, got {} bytes).".format(
+                expected_torrent_data_info_piece_hashes_size, len(torrent_data_info_piece_hashes)))
 
-        torrent_data_info_piece_hashes_offset = 0
-        piece = bytearray()
+        print("[{}] Torrent has {} files, {} bytes, piece size {} bytes.".format(torrent_filename, len(file_descriptions), total_size, piece_size))
 
-        # Read all files specified in the torrent.
-        for file_description in file_descriptions:
-            full_filename = os.path.join(prefix_path, file_description.name)
-            print("    File {}: {} bytes.".format(full_filename, file_description.size))
+        if not check_content:
+            # Just list the contents of the torrent file; do not verify.
+            for file_description in file_descriptions:
+                print("[{}] File {}: {} bytes.".format(torrent_filename, file_description.name, file_description.size))
+        else:
+            # List and veridy the contents of the torrent file.
 
-            # Verify actual size of the file.
-            actual_size = os.stat(full_filename).st_size
-            if actual_size != file_description.size:
-                raise TorrentVerificationError("Actual file size ({}) does not correspond to the file size specified in the forrent file ({}).".format(
-                    actual_size, file_description.size))
+            torrent_data_info_piece_hashes_offset = 0
+            piece = bytearray()
 
-            # Read the file, piece-by-piece, and verify pieces as they come in.
-            with open(full_filename, "rb") as fi:
-                while True:
-                    missing = piece_size - len(piece)
-                    fragment = fi.read(missing)
-                    if len(fragment) == 0:
-                        # End-of-file reached.
-                        break
-                    piece.extend(fragment)
-                    assert len(piece) <= piece_size
-                    if len(piece) == piece_size:
-                        # We have a full piece.Verify its hash.
-                        piece_hash = hashlib.sha1(piece).digest()
-                        piece.clear()
-                        if not torrent_data_info_piece_hashes.startswith(piece_hash, torrent_data_info_piece_hashes_offset):
-                            raise TorrentVerificationError("SHA1 hash mismatch for piece.")
-                        torrent_data_info_piece_hashes_offset += single_piece_hash_size
+            # Read all files specified in the torrent.
+            for file_description in file_descriptions:
 
-        # After processing all files specified in the torrent, we may have a trailing piece that needs to be hash-verified.
-        if len(piece) != 0:
-            # We have a trailing piece. Process it.
-            piece_hash = hashlib.sha1(piece).digest()
-            piece.clear()
-            if not torrent_data_info_piece_hashes.startswith(piece_hash, torrent_data_info_piece_hashes_offset):
-                raise TorrentVerificationError("SHA1 hash mismatch for piece.")
-            torrent_data_info_piece_hashes_offset += single_piece_hash_size
+                full_filename = os.path.join(prefix_path, file_description.name)
+                #print("[{}] Verifying file {}: {} bytes.".format(torrent_filename, full_filename, file_description.size))
 
-        # This assertion must be true given that we checked the correspondence between total_size, piece_size, and len(torrent_data_info_piece_hashes) before.
-        assert torrent_data_info_piece_hashes_offset == len(torrent_data_info_piece_hashes)
+                try:
+                    # Verify actual size of the file.
+                    actual_size = os.stat(full_filename).st_size
+                    if actual_size != file_description.size:
+                        raise TorrentVerificationError("Actual file size ({}) does not correspond to the file size specified in the forrent file ({}).".format(
+                            actual_size, file_description.size))
 
-        print("    **** Succesfully verified all {} pieces.".format(expected_torrent_data_info_piece_hashes_count))
+                    # Read the file, piece-by-piece, and verify pieces as they come in.
+                    with open(full_filename, "rb") as fi:
+                        while True:
+                            missing = piece_size - len(piece)
+                            fragment = fi.read(missing)
+                            if len(fragment) == 0:
+                                # End-of-file reached.
+                                break
+                            piece.extend(fragment)
+                            assert len(piece) <= piece_size
+                            if len(piece) == piece_size:
+                                # We have a full piece.Verify its hash.
+                                piece_hash = hashlib.sha1(piece).digest()
+                                piece.clear()
+                                if not torrent_data_info_piece_hashes.startswith(piece_hash, torrent_data_info_piece_hashes_offset):
+                                    raise TorrentVerificationError("SHA1 hash mismatch for piece (file: {}).".format(full_filename))
+                                torrent_data_info_piece_hashes_offset += single_piece_hash_size
+                except FileNotFoundError:
+                    raise TorrentVerificationError("File not found, unable to verify: {!r}".format(full_filename))
+
+            # After processing all files specified in the torrent, we may have a trailing piece that needs to be hash-verified.
+            if len(piece) != 0:
+                # We have a trailing piece. Process it.
+                piece_hash = hashlib.sha1(piece).digest()
+                piece.clear()
+                if not torrent_data_info_piece_hashes.startswith(piece_hash, torrent_data_info_piece_hashes_offset):
+                    raise TorrentVerificationError("SHA1 hash mismatch for piece (file: {}).".format(full_filename))
+                torrent_data_info_piece_hashes_offset += single_piece_hash_size
+
+            # This assertion must be true given that we checked the correspondence between total_size, piece_size, and len(torrent_data_info_piece_hashes) before.
+            assert torrent_data_info_piece_hashes_offset == len(torrent_data_info_piece_hashes)
+
+            print("[{}] Successfully verified all {} pieces.".format(torrent_filename, expected_torrent_data_info_piece_hashes_count))
+
+    except TorrentVerificationError as exception:
+        print("[{}] Error: {}".format(torrent_filename, exception))
 
 def main():
 
